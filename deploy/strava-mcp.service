@@ -1,0 +1,23 @@
+[Unit]
+Description=Strava MCP Server (Streamable HTTP)
+After=network.target
+
+[Service]
+Type=simple
+User=strava-mcp
+Group=strava-mcp
+WorkingDirectory=/opt/strava-mcp
+ExecStart=/opt/strava-mcp/.venv/bin/python /opt/strava-mcp/mcp_server.py --transport http
+EnvironmentFile=/opt/strava-mcp/.env
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/strava-mcp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

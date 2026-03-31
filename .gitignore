@@ -1,0 +1,23 @@
+# Credentials and secrets
+.env
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

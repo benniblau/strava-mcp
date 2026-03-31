@@ -105,15 +105,20 @@ class StravaDownloader:
     # Authentication / token management
     # ------------------------------------------------------------------
 
-    def authenticate(self) -> None:
-        """Refresh access token if expired or about to expire (within 5 min)."""
-        if self.access_token and time.time() < self.expires_at - 300:
+    def authenticate(self, force: bool = False) -> None:
+        """Refresh access token if expired or about to expire (within 5 min).
+
+        Pass force=True to always fetch a new token regardless of expiry —
+        used when the API has returned a 401 despite a seemingly valid token.
+        """
+        if not force and self.access_token and time.time() < self.expires_at - 300:
             print("✅  Access token still valid")
             return
 
         # If expires_at is 0 (unknown), probe the existing token first before
         # trying a refresh — avoids a needless round-trip when the token works.
-        if self.access_token and self.expires_at == 0:
+        # Skip the probe when force=True (we already know the token is rejected).
+        if not force and self.access_token and self.expires_at == 0:
             try:
                 probe = requests.get(
                     f"{BASE_URL}/athlete",
@@ -216,8 +221,8 @@ class StravaDownloader:
 
             if resp.status_code == 401:
                 if attempt == 0:
-                    print("⚠️   401 Unauthorized — refreshing token and retrying…")
-                    self.authenticate()
+                    print("⚠️   401 Unauthorized — forcing token refresh and retrying…")
+                    self.authenticate(force=True)
                     headers["Authorization"] = f"Bearer {self.access_token}"
                     continue
                 resp.raise_for_status()

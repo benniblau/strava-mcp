@@ -220,12 +220,21 @@ class StravaDownloader:
             resp = requests.get(url, headers=headers, params=params, timeout=30)
 
             if resp.status_code == 401:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text
                 if attempt == 0:
-                    print("⚠️   401 Unauthorized — forcing token refresh and retrying…")
+                    print(f"⚠️   401 Unauthorized ({err_body}) — forcing token refresh and retrying…")
                     self.authenticate(force=True)
                     headers["Authorization"] = f"Bearer {self.access_token}"
                     continue
-                resp.raise_for_status()
+                raise RuntimeError(
+                    f"401 Unauthorized after token refresh on {endpoint}.\n"
+                    f"Strava error: {err_body}\n"
+                    "This is likely a scope issue — re-authorize with "
+                    "scope=activity:read_all,profile:read_all and update STRAVA_REFRESH_TOKEN."
+                )
 
             if resp.status_code == 429:
                 # Parse rate limit headers
@@ -396,16 +405,33 @@ class StravaDownloader:
             "synced_at": _now(),
         }
 
-    def download_activities(self, days_back: Optional[int] = None) -> List[int]:
+    def download_activities(
+        self,
+        days_back: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> List[int]:
         """
         Fetch activity list and upsert into activities table.
         Returns list of newly inserted activity IDs.
+
+        Priority order for the cutoff date:
+          1. since (YYYY-MM-DD string, explicit date)
+          2. days_back (relative days from today)
+          3. incremental (latest activity already in DB, minus 1 day)
+          4. STRAVA_START_DATE env var or 2-year default (fresh DB)
         """
         print("\n🏃  Downloading activities…")
 
         # Determine the 'after' cutoff timestamp
         after: Optional[int] = None
-        if days_back is not None:
+        if since is not None:
+            try:
+                cutoff = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+            except ValueError:
+                raise ValueError(f"--since date '{since}' is not a valid YYYY-MM-DD date")
+            after = int(cutoff.timestamp())
+            print(f"    Fetching activities since {cutoff.date()} (--since)")
+        elif days_back is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
             after = int(cutoff.timestamp())
             print(f"    Fetching activities since {cutoff.date()} ({days_back} days back)")
@@ -844,10 +870,18 @@ class StravaDownloader:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download Strava data to SQLite")
-    parser.add_argument(
+
+    cutoff_group = parser.add_mutually_exclusive_group()
+    cutoff_group.add_argument(
+        "--since", metavar="DATE",
+        help="Sync activities on or after this date (YYYY-MM-DD). "
+             "Overrides incremental logic and --days."
+    )
+    cutoff_group.add_argument(
         "--days", type=int, default=None,
         help="Sync activities from this many days back (overrides incremental logic)"
     )
+
     parser.add_argument(
         "--full", action="store_true",
         help="Re-fetch detail (laps/zones) for ALL activities, not just new ones"
@@ -862,7 +896,7 @@ def main() -> None:
 
     athlete_id = downloader.download_athlete()
 
-    new_ids = downloader.download_activities(days_back=args.days)
+    new_ids = downloader.download_activities(days_back=args.days, since=args.since)
 
     # Decide which activities need detail fetched
     if args.full:

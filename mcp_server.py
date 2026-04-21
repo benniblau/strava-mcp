@@ -678,8 +678,15 @@ def main_http() -> None:
         async with session_manager.run():
             yield
 
+    def _normalize_path(inner):
+        async def wrapped(scope, receive, send):
+            if scope["type"] == "http" and not scope.get("path"):
+                scope = {**scope, "path": "/"}
+            await inner(scope, receive, send)
+        return wrapped
+
     mcp_app = RequireAuthMiddleware(
-        session_manager.handle_request,
+        _normalize_path(session_manager.handle_request),
         required_scopes=["mcp:access"],
     )
 

@@ -7,9 +7,10 @@ gear, routes, and starred segments from the Strava API v3 and stores everything
 in a local SQLite database. Designed to run as a cron job for incremental syncs.
 
 Usage:
-    python strava_downloader.py              # incremental (since last activity in DB)
-    python strava_downloader.py --days 30   # re-sync last 30 days
-    python strava_downloader.py --full      # re-fetch detail for ALL activities
+    python strava_downloader.py                    # incremental (since last activity in DB)
+    python strava_downloader.py --days 30          # re-sync last 30 days
+    python strava_downloader.py --backfill-detail  # fetch detail only where missing
+    python strava_downloader.py --full             # re-fetch detail for ALL activities
 """
 
 import argparse
@@ -48,7 +49,7 @@ def _now() -> str:
     return _ts(datetime.now(timezone.utc))
 
 
-def _upsert(conn: sqlite3.Connection, table: str, data: Dict[str, Any], pk: str = "id") -> None:
+def _upsert(conn: sqlite3.Connection, table: str, data: Dict[str, Any]) -> None:
     """Generic INSERT OR REPLACE."""
     if not data:
         return
@@ -95,11 +96,6 @@ class StravaDownloader:
             conn.executescript(schema)
             conn.commit()
         print("✅  Database ready")
-
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
     # ------------------------------------------------------------------
     # Authentication / token management
@@ -664,6 +660,14 @@ class StravaDownloader:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def get_all_activity_ids(self) -> List[int]:
+        """Return IDs of every activity in the database, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id FROM activities ORDER BY start_date DESC"
+            ).fetchall()
+        return [r[0] for r in rows]
+
     # ------------------------------------------------------------------
     # Gear
     # ------------------------------------------------------------------
@@ -887,6 +891,10 @@ def main() -> None:
         help="Re-fetch detail (laps/zones) for ALL activities, not just new ones"
     )
     parser.add_argument(
+        "--backfill-detail", action="store_true",
+        help="Fetch detail only for activities that have none yet (cheap catch-up)"
+    )
+    parser.add_argument(
         "--db", default=os.getenv("STRAVA_DB_PATH", str(DEFAULT_DB_PATH)),
         help="Path to SQLite database"
     )
@@ -898,10 +906,17 @@ def main() -> None:
 
     new_ids = downloader.download_activities(days_back=args.days, since=args.since)
 
-    # Decide which activities need detail fetched
+    # Decide which activities need detail fetched.
+    # --full re-fetches everything, as documented. --backfill-detail is the
+    # cheaper "only what's missing" pass.
     if args.full:
+        ids_for_detail = downloader.get_all_activity_ids()
+        print(f"\n📋  --full mode: re-fetching detail for all {len(ids_for_detail)} activities")
+        est_min = len(ids_for_detail) * 0.6 / 60
+        print(f"    At ~0.6s per activity this takes roughly {est_min:.0f} min.")
+    elif args.backfill_detail:
         ids_for_detail = downloader.get_activities_without_detail()
-        print(f"\n📋  --full mode: fetching detail for {len(ids_for_detail)} activities")
+        print(f"\n📋  --backfill-detail: fetching detail for {len(ids_for_detail)} activities missing it")
     else:
         ids_for_detail = new_ids
         if ids_for_detail:

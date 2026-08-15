@@ -12,7 +12,7 @@ Two-component system:
 |------|---------|
 | `strava_downloader.py` | Data ingestion (auth, API calls, DB upserts) |
 | `mcp_server.py` | FastMCP server — resources + tools + HTTP transport |
-| `schema/schema_strava.sql` | Full SQLite schema (11 tables, 2 views) |
+| `schema/schema_strava.sql` | Full SQLite schema (10 tables, 2 views) |
 | `.env` | Credentials and config (auto-updated by downloader) |
 | `requirements.txt` | Python dependencies |
 | `deploy/strava-mcp.service` | systemd unit for production |
@@ -26,7 +26,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Sync Strava data
 .venv/bin/python strava_downloader.py --days 30   # last 30 days
 .venv/bin/python strava_downloader.py             # incremental (since last DB entry)
-.venv/bin/python strava_downloader.py --full      # re-fetch detail for all activities
+.venv/bin/python strava_downloader.py --backfill-detail  # detail only where missing
+.venv/bin/python strava_downloader.py --full             # re-fetch detail for ALL activities
 
 # Start MCP server (HTTP, default)
 .venv/bin/python mcp_server.py
@@ -104,7 +105,8 @@ All writes use `INSERT OR REPLACE` (upsert). Re-running the downloader is always
 - `GET /activities/{id}` returns DetailedActivity (adds laps, splits, segment efforts)
 - `GET /activities/{id}/zones` is a separate call
 - Downloader sleeps 0.6s between detail fetches to stay well under rate limits
-- Use `--full` flag to backfill detail for activities synced before detail-fetching was added
+- Use `--backfill-detail` to fill in detail for activities synced before detail-fetching
+  was added; `--full` re-fetches detail for every activity (slow, one request each)
 
 ## Modeled after
 

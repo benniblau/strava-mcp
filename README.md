@@ -59,7 +59,10 @@ Add it as `STRAVA_MCP_AUTH_TOKEN` in `.env`.
 # Full historical sync (2+ years, respects Strava rate limits automatically)
 .venv/bin/python strava_downloader.py
 
-# Re-fetch laps/zones for all activities (if you ran a summary-only import before)
+# Fetch laps/zones only for activities that are missing them (cheap catch-up)
+.venv/bin/python strava_downloader.py --backfill-detail
+
+# Re-fetch laps/zones for EVERY activity (one API request each — slow)
 .venv/bin/python strava_downloader.py --full
 ```
 
@@ -84,6 +87,10 @@ This starts an HTTP server on port `8080` (default). Connect your MCP client wit
   }
 }
 ```
+
+Both `/mcp` and `/mcp/` are accepted — the server rewrites the bare path internally
+instead of issuing a redirect, so clients that don't follow redirects (or that drop
+the `Authorization` header when they do) work either way.
 
 For stdio transport (Claude Desktop local):
 ```bash

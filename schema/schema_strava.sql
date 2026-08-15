@@ -359,9 +359,14 @@ CREATE TABLE IF NOT EXISTS routes (
 
 -- ============================================================
 -- Views
+--
+-- Views are derived objects, so they are dropped and recreated on every run.
+-- CREATE VIEW IF NOT EXISTS would silently keep a stale definition in any
+-- database that already exists, meaning view fixes never take effect.
 -- ============================================================
 
-CREATE VIEW IF NOT EXISTS activity_summary AS
+DROP VIEW IF EXISTS activity_summary;
+CREATE VIEW activity_summary AS
 SELECT
     a.id,
     a.name,
@@ -398,7 +403,8 @@ SELECT
 FROM activities a
 LEFT JOIN gear g ON a.gear_id = g.id;
 
-CREATE VIEW IF NOT EXISTS monthly_stats AS
+DROP VIEW IF EXISTS monthly_stats;
+CREATE VIEW monthly_stats AS
 SELECT
     strftime('%Y-%m', start_date_local)     AS month,
     sport_type,

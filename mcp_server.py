@@ -7,8 +7,11 @@ Supports both stdio (Claude Desktop) and HTTP streamable transports with bearer
 token authentication.
 
 Usage:
-    python mcp_server.py                       # stdio (default)
-    python mcp_server.py --transport http      # HTTP on STRAVA_MCP_HTTP_PORT
+    python mcp_server.py                       # HTTP (default) on STRAVA_MCP_HTTP_PORT
+    python mcp_server.py --transport stdio     # stdio, for local Claude Desktop
+
+The default transport comes from STRAVA_MCP_TRANSPORT and falls back to "http".
+In HTTP mode both /mcp and /mcp/ are served.
 """
 
 import argparse
@@ -40,6 +43,9 @@ mcp = FastMCP("strava-activities")
 
 DEFAULT_DB = os.path.join(os.path.dirname(__file__), "strava_activities.db")
 DB_PATH = os.getenv("STRAVA_DB_PATH", DEFAULT_DB)
+
+# Mount point for the streamable HTTP transport (no trailing slash).
+MCP_PATH = "/mcp"
 
 
 @contextmanager
@@ -679,6 +685,7 @@ def main_http() -> None:
             yield
 
     def _normalize_path(inner):
+        """Give the session manager a non-empty path when mounted at /mcp."""
         async def wrapped(scope, receive, send):
             if scope["type"] == "http" and not scope.get("path"):
                 scope = {**scope, "path": "/", "raw_path": b"/"}
@@ -691,15 +698,35 @@ def main_http() -> None:
     )
 
     app = Starlette(
-        routes=[Mount("/mcp", app=mcp_app)],
+        routes=[Mount(MCP_PATH, app=mcp_app)],
         middleware=[
             Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(verifier)),
         ],
         lifespan=lifespan,
     )
 
+    def _accept_bare_mcp_path(inner):
+        """
+        Make `/mcp` and `/mcp/` behave identically.
+
+        Starlette compiles Mount("/mcp") to the regex `^/mcp/(?P<path>.*)$`, so a
+        request to bare `/mcp` does not match and the router answers with a 307
+        redirect to `/mcp/`. Many MCP clients do not follow redirects, and some
+        drop the Authorization header when they do. Rewriting the path here —
+        outside the router — means both spellings are served directly.
+        """
+        async def wrapped(scope, receive, send):
+            if scope["type"] in ("http", "websocket") and scope.get("path") == MCP_PATH:
+                scope = {
+                    **scope,
+                    "path": MCP_PATH + "/",
+                    "raw_path": (MCP_PATH + "/").encode("ascii"),
+                }
+            await inner(scope, receive, send)
+        return wrapped
+
     logger.info(f"Starting Strava MCP HTTP server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(_accept_bare_mcp_path(app), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
@@ -708,7 +735,7 @@ if __name__ == "__main__":
         "--transport",
         choices=["stdio", "http"],
         default=os.getenv("STRAVA_MCP_TRANSPORT", "http"),
-        help="Transport mode (default: stdio)",
+        help="Transport mode (default: http, or set STRAVA_MCP_TRANSPORT)",
     )
     args = parser.parse_args()
 

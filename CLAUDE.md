@@ -77,6 +77,17 @@ Views:
 
 All writes use `INSERT OR REPLACE` (upsert). Re-running the downloader is always safe.
 
+Because `INSERT OR REPLACE` rewrites the whole row, columns that only
+DetailedActivity carries would be blanked by a later summary sync. Those
+columns are listed in `DETAIL_ONLY_COLUMNS` (`device_name`, `description`) and
+carried forward from the existing row in `download_activities()`. **Add any new
+detail-only column to that tuple**, or it will silently disappear on the next
+incremental run.
+
+New columns also never reach an existing database, since every table is
+`CREATE TABLE IF NOT EXISTS`. `_add_missing_columns()` runs after the schema
+and `ALTER TABLE`s anything absent; add new columns there too.
+
 ## MCP resources and tools
 
 **Resources** (read-only data):
@@ -102,7 +113,12 @@ All writes use `INSERT OR REPLACE` (upsert). Re-running the downloader is always
 - Rate limit: 100 requests / 15 min, 1000 / day
 - Access tokens expire after 6 hours; refresh tokens are long-lived
 - `GET /athlete/activities` returns SummaryActivity (no laps/zones)
-- `GET /activities/{id}` returns DetailedActivity (adds laps, splits, segment efforts)
+- `GET /activities/{id}` returns DetailedActivity (adds laps, splits, segment
+  efforts, `description` and `device_name`)
+- **`device_name` is your own activities only.** There is no endpoint for
+  another athlete's activities, and none for followers/following — the social
+  graph is not exposed by the API at all, so device usage cannot be surveyed
+  across the people you follow.
 - `GET /activities/{id}/zones` is a separate call
 - Downloader sleeps 0.6s between detail fetches to stay well under rate limits
 - Use `--backfill-detail` to fill in detail for activities synced before detail-fetching

@@ -35,6 +35,11 @@ TOKEN_URL = "https://www.strava.com/oauth/token"
 SCHEMA_PATH = Path(__file__).parent / "schema" / "schema_strava.sql"
 DEFAULT_DB_PATH = Path(__file__).parent / "strava_activities.db"
 
+# Columns only DetailedActivity (GET /activities/{id}) populates. The activity
+# list returns SummaryActivity, which omits them, so a summary re-sync would
+# blank them out — see download_activities().
+DETAIL_ONLY_COLUMNS = ("device_name", "description")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,8 +99,29 @@ class StravaDownloader:
         schema = SCHEMA_PATH.read_text()
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript(schema)
+            self._add_missing_columns(conn)
             conn.commit()
         print("✅  Database ready")
+
+    @staticmethod
+    def _add_missing_columns(conn: sqlite3.Connection) -> None:
+        """
+        Add columns introduced after a database was first created.
+
+        Every table in the schema is `CREATE TABLE IF NOT EXISTS`, so a new
+        column never reaches an existing database. SQLite has no
+        `ADD COLUMN IF NOT EXISTS`, so compare against the live table.
+        """
+        added = []
+        for table, column, ddl in (
+            ("activities", "device_name", "TEXT"),
+        ):
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                added.append(f"{table}.{column}")
+        if added:
+            print(f"    Added column(s): {', '.join(added)}")
 
     # ------------------------------------------------------------------
     # Authentication / token management
@@ -396,6 +422,7 @@ class StravaDownloader:
             "hide_from_home": int(bool(a.get("hide_from_home"))),
             "visibility": a.get("visibility"),
             "gear_id": a.get("gear_id"),
+            "device_name": a.get("device_name"),
             "external_id": a.get("external_id"),
             "upload_id": a.get("upload_id"),
             "synced_at": _now(),
@@ -480,14 +507,22 @@ class StravaDownloader:
                     if not exists:
                         new_ids.append(activity_id)
                     else:
-                        # Preserve detail_synced_at when updating summary
+                        # This is a SummaryActivity, and _upsert rewrites the
+                        # whole row, so anything only DetailedActivity carries
+                        # would be nulled out. Carry those forward instead.
                         row.pop("detail_synced_at", None)
+                        carried = ", ".join(DETAIL_ONLY_COLUMNS)
                         existing = conn.execute(
-                            "SELECT detail_synced_at FROM activities WHERE id = ?",
+                            f"SELECT detail_synced_at, {carried} "
+                            "FROM activities WHERE id = ?",
                             (activity_id,),
                         ).fetchone()
-                        if existing and existing[0]:
-                            row["detail_synced_at"] = existing[0]
+                        if existing:
+                            if existing[0]:
+                                row["detail_synced_at"] = existing[0]
+                            for column, value in zip(DETAIL_ONLY_COLUMNS, existing[1:]):
+                                if row.get(column) is None and value is not None:
+                                    row[column] = value
                     _upsert(conn, "activities", row)
                 conn.commit()
 

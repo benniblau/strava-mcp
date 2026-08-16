@@ -184,6 +184,12 @@ CREATE TABLE IF NOT EXISTS activities (
     -- Gear
     gear_id TEXT REFERENCES gear(id),
 
+    -- Recording device, e.g. "COROS PACE 3" or "Garmin Forerunner 965".
+    -- Detail-only: SummaryActivity does not carry it, so it arrives with
+    -- GET /activities/{id} and must be preserved when a later summary sync
+    -- rewrites the row.
+    device_name TEXT,
+
     -- External data
     external_id TEXT,
     upload_id INTEGER,
@@ -399,6 +405,7 @@ SELECT
     a.commute,
     a.gear_id,
     g.name                                  AS gear_name,
+    a.device_name,
     a.detail_synced_at IS NOT NULL          AS has_detail
 FROM activities a
 LEFT JOIN gear g ON a.gear_id = g.id;

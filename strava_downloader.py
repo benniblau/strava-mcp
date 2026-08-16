@@ -71,7 +71,12 @@ def _upsert(conn: sqlite3.Connection, table: str, data: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 class StravaDownloader:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, skip_auth: bool = False):
+        """
+        `skip_auth` is for the authorization flow only: exchanging a fresh
+        OAuth code must not first refresh with the old token, which may already
+        have been invalidated by the re-authorization.
+        """
         self.db_path = str(db_path)
         self.client_id = os.getenv("STRAVA_CLIENT_ID", "")
         self.client_secret = os.getenv("STRAVA_CLIENT_SECRET", "")
@@ -83,12 +88,13 @@ class StravaDownloader:
         if not self.client_id or not self.client_secret:
             print("❌  STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET must be set in .env")
             sys.exit(1)
-        if not self.refresh_token:
+        if not self.refresh_token and not skip_auth:
             print("❌  STRAVA_REFRESH_TOKEN must be set in .env")
             sys.exit(1)
 
         self.init_database()
-        self.authenticate()
+        if not skip_auth:
+            self.authenticate()
 
     # ------------------------------------------------------------------
     # Database
@@ -206,6 +212,33 @@ class StravaDownloader:
         self._save_tokens()
         print(f"✅  Token refreshed, expires {datetime.fromtimestamp(self.expires_at)}")
 
+    def exchange_code(self, code: str) -> None:
+        """
+        Trade a one-time authorization code for tokens and persist them.
+
+        Only needed when the granted scopes change — `activity:write` for
+        uploads, say. Ordinary running never comes through here, because the
+        refresh token carries the scopes forward.
+        """
+        resp = requests.post(TOKEN_URL, data={
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "authorization_code",
+            "code": code,
+        }, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Code exchange failed ({resp.status_code}): {resp.text[:200]}\n"
+                "Authorization codes are single-use and expire quickly — "
+                "re-authorize and try again with a fresh one."
+            )
+        data = resp.json()
+        self.access_token = data["access_token"]
+        self.refresh_token = data["refresh_token"]
+        self.expires_at = data["expires_at"]
+        self._save_tokens()
+        print(f"✅  Authorized, token expires {datetime.fromtimestamp(self.expires_at)}")
+
     def _save_tokens(self) -> None:
         """Persist updated tokens back into the .env file."""
         updates = {
@@ -280,6 +313,81 @@ class StravaDownloader:
             return resp.json()
 
         raise RuntimeError(f"Failed to GET {endpoint} after 3 attempts (last status: {resp.status_code})")
+
+    # ------------------------------------------------------------------
+    # Write endpoints — all require the activity:write scope
+    # ------------------------------------------------------------------
+
+    def upload_activity(self, path: str, name: Optional[str] = None,
+                        data_type: str = "fit", external_id: Optional[str] = None,
+                        description: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Upload an activity file. Returns the Upload object, not an activity.
+
+        Processing is asynchronous: poll get_upload() until `activity_id` is
+        set or `error` is populated. A file whose start time matches an
+        existing activity fails with a duplicate error rather than importing.
+        """
+        self.authenticate()
+        fit = Path(path)
+        fields: Dict[str, Any] = {"data_type": data_type}
+        if name:
+            fields["name"] = name
+        if description:
+            fields["description"] = description
+        if external_id:
+            fields["external_id"] = external_id
+
+        for attempt in range(3):
+            with open(fit, "rb") as fh:
+                resp = requests.post(
+                    f"{BASE_URL}/uploads",
+                    headers={"Authorization": f"Bearer {self.access_token}"},
+                    data=fields,
+                    files={"file": (fit.name, fh, "application/octet-stream")},
+                    timeout=120,
+                )
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    "401 on upload. The token most likely lacks the activity:write "
+                    "scope — re-authorize with "
+                    "scope=activity:read_all,activity:write,profile:read_all and "
+                    "run `--authorize <code>`."
+                )
+            if resp.status_code == 429:
+                # Batch uploads run into the 100-per-15-minutes limit; wait for
+                # the window to roll over rather than losing the run.
+                usage = resp.headers.get("X-RateLimit-Usage", "?")
+                sleep_secs = 900 - (time.time() % 900) + 5
+                print(f"⏳  Rate limited on upload (usage {usage}) — "
+                      f"sleeping {sleep_secs:.0f}s")
+                time.sleep(sleep_secs)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        raise RuntimeError(f"Upload failed after 3 attempts (last status {resp.status_code})")
+
+    def get_upload(self, upload_id: int) -> Dict[str, Any]:
+        """Poll an upload. `activity_id` appears on success, `error` on failure."""
+        return self._get(f"/uploads/{upload_id}")
+
+    def update_activity(self, activity_id: int, **fields: Any) -> Dict[str, Any]:
+        """
+        Update an existing activity.
+
+        Accepts the writable subset: name, description, sport_type, gear_id,
+        trainer, commute, hide_from_home. There is no delete endpoint in the
+        Strava API, so hiding and renaming is as close as it gets.
+        """
+        self.authenticate()
+        resp = requests.put(
+            f"{BASE_URL}/activities/{activity_id}",
+            headers={"Authorization": f"Bearer {self.access_token}"},
+            json=fields,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Athlete
@@ -933,7 +1041,17 @@ def main() -> None:
         "--db", default=os.getenv("STRAVA_DB_PATH", str(DEFAULT_DB_PATH)),
         help="Path to SQLite database"
     )
+    parser.add_argument(
+        "--authorize", metavar="CODE",
+        help="Exchange a one-time OAuth code for tokens and exit. Needed only "
+             "when the granted scopes change (e.g. adding activity:write); the "
+             "refresh token carries scopes forward otherwise."
+    )
     args = parser.parse_args()
+
+    if args.authorize:
+        StravaDownloader(db_path=args.db, skip_auth=True).exchange_code(args.authorize)
+        return
 
     downloader = StravaDownloader(db_path=args.db)
 

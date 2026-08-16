@@ -108,6 +108,16 @@ and `ALTER TABLE`s anything absent; add new columns there too.
 - `get_routes` — saved routes
 - `execute_sql` — custom SELECT queries (read-only)
 
+**Write tools** (push to Strava, require the `activity:write` scope):
+- `upload_activity` — upload a FIT/GPX/TCX file, polling until Strava has
+  created the activity or rejected it
+- `get_upload_status` — poll an upload started with `wait=False`
+- `update_activity` — name, description, sport_type, gear_id, trainer,
+  commute, hide_from_home
+
+`get_client()` builds the downloader lazily, so the read-only tools keep
+working when credentials are absent or the token has lapsed.
+
 ## Strava API notes
 
 - Rate limit: 100 requests / 15 min, 1000 / day
@@ -119,6 +129,29 @@ and `ALTER TABLE`s anything absent; add new columns there too.
   another athlete's activities, and none for followers/following — the social
   graph is not exposed by the API at all, so device usage cannot be surveyed
   across the people you follow.
+- **Uploading is asynchronous.** `POST /uploads` returns an upload id, not an
+  activity; poll `GET /uploads/{id}` until `activity_id` or `error` appears.
+  A file whose start time matches an existing activity fails as a duplicate
+  rather than importing twice.
+- **Deletion is closed to third-party apps.** `DELETE /api/v3/activities/{id}`
+  exists — it answers `401 {"resource":"Application","field":"internal",
+  "code":"invalid"}` rather than 404 or 405 — but it is restricted to Strava's
+  internal applications. That error means the *application* is not permitted;
+  a scope problem instead reads `{"resource":"AccessToken","field":"…",
+  "code":"missing"}`. No scope unlocks it. `POST` with `_method=delete` hits
+  the same wall.
+  The website uses the same path via a Rails UJS link authenticated by session
+  cookie and CSRF token — a different security context, and not something to
+  automate. Deleting in the UI is the supported route; Strava keeps a deleted
+  activity restorable for 30 days.
+- **`PUT /activities/{id}` silently ignores unknown fields.** Sending
+  `{"delete": true}` returns 200 with the activity unchanged. A misspelled
+  field name reports success and does nothing, so verify the effect rather
+  than the status code.
+- **Changing scopes needs a fresh authorization.** A refresh token carries
+  forward the scopes it was granted and cannot widen them; use
+  `--authorize <code>`, which skips the usual startup refresh so the old token
+  cannot interfere.
 - `GET /activities/{id}/zones` is a separate call
 - Downloader sleeps 0.6s between detail fetches to stay well under rate limits
 - Use `--backfill-detail` to fill in detail for activities synced before detail-fetching

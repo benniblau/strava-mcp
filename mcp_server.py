@@ -20,8 +20,10 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -621,6 +623,153 @@ def execute_sql(query: str, limit: int = 100) -> str:
         with get_db() as conn:
             rows = conn.execute(query).fetchall()
         return json.dumps({"count": len(rows), "rows": _rows(rows)}, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write tools — these push to Strava. All require the activity:write scope.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_client = None
+
+
+def get_client():
+    """
+    Lazily build a StravaDownloader for the write path.
+
+    Imported on first use rather than at module load, so the read-only tools
+    keep working when credentials are missing or the token has lapsed.
+    """
+    global _client
+    if _client is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from strava_downloader import StravaDownloader
+        _client = StravaDownloader(db_path=DB_PATH)
+    return _client
+
+
+@mcp.tool()
+def upload_activity(
+    path: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    data_type: str = "fit",
+    wait: bool = True,
+) -> str:
+    """
+    Upload an activity file to Strava.
+
+    This writes to your Strava account and needs the activity:write scope.
+    Uploading is asynchronous, so with wait=True this polls until Strava has
+    either created the activity or rejected the file.
+
+    Strava refuses a file whose start time matches an existing activity, which
+    surfaces as a duplicate error rather than a second copy.
+
+    Note there is NO delete endpoint in the Strava API — anything uploaded has
+    to be removed by hand on the website.
+
+    Args:
+        path: Absolute path to a .fit, .gpx or .tcx file readable by the server.
+        name: Title for the resulting activity.
+        description: Description for the resulting activity.
+        data_type: fit, fit.gz, gpx, gpx.gz, tcx or tcx.gz.
+        wait: Poll until processing finishes (default True).
+    """
+    try:
+        f = Path(path).expanduser()
+        if not f.is_file():
+            return json.dumps({"error": f"No such file: {f}"})
+
+        client = get_client()
+        upload = client.upload_activity(str(f), name=name, description=description,
+                                        data_type=data_type)
+        result = {"upload_id": upload.get("id"), "status": upload.get("status")}
+        if not wait:
+            return json.dumps(result, indent=2)
+
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            time.sleep(3)
+            state = client.get_upload(upload["id"])
+            if state.get("error"):
+                return json.dumps({**result, "status": "failed",
+                                   "error": state["error"]}, indent=2)
+            if state.get("activity_id"):
+                return json.dumps({**result, "status": "ready",
+                                   "activity_id": state["activity_id"],
+                                   "note": "Run the downloader to pull it into "
+                                           "the local database."}, indent=2)
+        return json.dumps({**result, "status": "still_processing"}, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_upload_status(upload_id: int) -> str:
+    """
+    Check an upload started earlier with upload_activity(wait=False).
+
+    Args:
+        upload_id: The id returned by upload_activity.
+    """
+    try:
+        return json.dumps(get_client().get_upload(upload_id), indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def update_activity(
+    activity_id: int,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    sport_type: Optional[str] = None,
+    gear_id: Optional[str] = None,
+    trainer: Optional[bool] = None,
+    commute: Optional[bool] = None,
+    hide_from_home: Optional[bool] = None,
+) -> str:
+    """
+    Update an existing Strava activity. Only the fields you pass are changed.
+
+    This writes to your Strava account and needs the activity:write scope.
+    Strava exposes no way to delete an activity through the API, so
+    hide_from_home is the closest thing to removing one from view.
+
+    Args:
+        activity_id: Strava activity id.
+        name: New title.
+        description: New description.
+        sport_type: e.g. Run, Ride, TrailRun.
+        gear_id: Gear to attach, e.g. "b12345" or "g6789".
+        trainer: Mark as a trainer/indoor activity.
+        commute: Mark as a commute.
+        hide_from_home: Hide from the followers' feed.
+    """
+    try:
+        fields = {k: v for k, v in {
+            "name": name, "description": description, "sport_type": sport_type,
+            "gear_id": gear_id, "trainer": trainer, "commute": commute,
+            "hide_from_home": hide_from_home,
+        }.items() if v is not None}
+        if not fields:
+            return json.dumps({"error": "Nothing to update — pass at least one field."})
+
+        updated = get_client().update_activity(activity_id, **fields)
+        with get_db() as conn:
+            if "name" in fields:
+                conn.execute("UPDATE activities SET name = ? WHERE id = ?",
+                             (fields["name"], activity_id))
+            if "description" in fields:
+                conn.execute("UPDATE activities SET description = ? WHERE id = ?",
+                             (fields["description"], activity_id))
+            conn.commit()
+
+        return json.dumps({"status": "ok", "activity_id": activity_id,
+                           "updated": list(fields),
+                           "name": updated.get("name")}, indent=2, default=str)
     except Exception as e:
         return json.dumps({"error": str(e)})
 

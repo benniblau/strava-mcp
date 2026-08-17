@@ -272,7 +272,17 @@ class StravaDownloader:
         headers = {"Authorization": f"Bearer {self.access_token}"}
 
         for attempt in range(3):
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=30)
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                # DNS blips and dropped connections killed a long batch run
+                # outright, since only HTTP status codes were being retried.
+                wait = 10 * (attempt + 1)
+                print(f"    Network error on {endpoint}: {str(e)[:80]}. "
+                      f"Retrying in {wait}s…")
+                time.sleep(wait)
+                continue
 
             if resp.status_code == 401:
                 try:

@@ -120,7 +120,10 @@ working when credentials are absent or the token has lapsed.
 
 ## Strava API notes
 
-- Rate limit: 100 requests / 15 min, 1000 / day
+- Rate limit: **200 requests / 15 min, 2000 / day** for this application. Read
+  them off a 429 rather than assuming — the response carries
+  `X-RateLimit-Usage: <15min>,<day>` and `X-RateLimit-Limit: 200,2000`. Strava's
+  documented default is half that, so an app can be on either.
 - Access tokens expire after 6 hours; refresh tokens are long-lived
 - `GET /athlete/activities` returns SummaryActivity (no laps/zones)
 - `GET /activities/{id}` returns DetailedActivity (adds laps, splits, segment
